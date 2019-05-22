@@ -1,62 +1,129 @@
+#  i.
+#  Request from client to negotiate auth method
+#  +----+----------+----------+
+#  |VER | NMETHODS | METHODS  |
+#  +----+----------+----------+
+#  | 1  |     1    | 1 to 255 |
+#  +----+----------+----------+
+#  3 common auth methods
+#  X’00’ NO AUTHENTICATION REQUIRED
+#  X’01’ GSSAPI
+#  X’02’ USERNAME/PASSWORD
+#  Response 
+#  +----+--------+
+#  |VER | METHOD |
+#  +----+--------+
+#  | 1  |    1   |
+#  +----+--------+
+
+# Based on RFC 1928, GSSAPI MUST be supported, and SHOULD support username/password authenticate methods
+
+import socket
+import select
+import threading
+import logging
+
+from sys import exit
 from socketserver import ThreadingTCPServer, StreamRequestHandler
-from socket import socket, inet_ntoa, AF_INET, SOCK_STREAM
 from struct import unpack, pack
-from select import select
 
-BUFF_SIZE = 4096
+BUF_SIZE = 4096
+(LOCAL, PORT) = ('127.0.0.1', 1080)
 
-(SERVER, PORT) = ('localhost', 9876)
+LOCK = threading.Lock()
+LOOP_RUNNING = False
 
 def send_data(sock, data):
     total = 0
-    l = len(data)
-    while total < l:
+    while total < len(data):
         sent = sock.send(data[total:])
-        if sent <= 0:
-            raise RuntimeError('socket connection broken')
+        if sent < 0:
+            raise RuntimeError('Error - broken socket')
         total += sent
 
-class LocalProxy(ThreadingTCPServer):
+class LocalSocks5Server(ThreadingTCPServer):
     pass
 
 class LocalRequestHandler(StreamRequestHandler):
-    def handleTCP(self, local, server):
-        r_fdset = [local, server]
-        count = 0
-        while True:
-            r, _, _ = select(r_fdset, [], [])
-            if local in r:
-                r_data = local.recv(BUFF_SIZE)
-                if count == 1:
-                    mode = r_data[1]
-                    atyp = r_data[3]
-                    port = unpack('>H', r_data[-2:])
-                    addr = None
-                    if atyp == 1:
-                        addr = inet_ntoa(r_data[4: 8])
-                    elif atyp == 3:
-                        addr_len = r_data[4]
-                        addr = r_data[5: 5 + addr_len]
-                    print('[mode]: %d' % mode)
-                    print('[Connecting]: %r,  [port]: %r' % (addr, port))
-                if count < 2:
-                    ver = r_data[0]
-                    print('[SOCKS ver required]: %r' % ver)
-                    count += 1
-                server.send(r_data)
-                pass
-            if server in r:
-                r_data = server.recv(BUFF_SIZE)
-                send_data(local, r_data)
+    def handleTCP(self, local, remote):
+        try:
+            r_fdset = [local, remote]
+            while True:
+                rfds, _, _ = select.select(r_fdset, [], [])
+                if local in rfds:
+                    r_data = local.recv(BUF_SIZE)
+                    if len(r_data) <= 0:
+                        break
+                    send_data(remote, r_data)
+                if remote in rfds:
+                    r_data = remote.recv(BUF_SIZE)
+                    if len(r_data) <= 0:
+                        break
+                    send_data(local, r_data)
+        finally:
+            local.close()
+            remote.close()
 
     def handle(self):
-        print('[Connection]: request from %r' % self.client_address[0])
-        # create SOCKS5 server socket
-        server = socket(AF_INET, SOCK_STREAM)
-        server.connect((SERVER, PORT))
-        local = self.connection
-        self.handleTCP(local, server)
+        try:
+            # Potential multi-threading issues, a lock is prefered
+            # print('Connection from: %r' % self.client_address[0])
+            logging.info('Request from %r' % self.client_address[0])
+            local = self.connection
+            # Authentication negotiate
+            r_data = local.recv(BUF_SIZE)
+            # support GSSAPI & user/password in the future
+            local.send(b'\x05\x00')
+            
+            # Relay request
+            r_data = local.recv(BUF_SIZE)
+            cmd = r_data[1]
+            atyp = r_data[3]
+            # reply = b'\x05\x00\x00'
+            if cmd == 1:
+                # CONNECT CMD
+                port = int.from_bytes(r_data[-2:], byteorder='big')
+                if atyp == 1:
+                    data = r_data[4: 8]
+                    address = socket.inet_ntoa(data)
+                    logging.info('[mode] CONNECT, [address]: %r, [port]: %r' % (str(address, 'utf-8'), port))
+                elif atyp == 3:
+                    l = r_data[4]
+                    address = r_data[5: 5 + l]
+                    logging.info('[mode] CONNECT, [address]: %s, [port]: %r' % (str(address, 'utf-8'), port))
+                elif atyp == 4:
+                    return
+                else:
+                    logging.error('Wrong address type received')
+                    return
+                
+                reply = b'\x05\x00\00' + r_data[3:]
+                local.send(reply)
+            elif cmd == 3:
+                # UDP ASSOCIATE
+                return
+            else:
+                logging.error('Not supported command received')
+                return
+            logging.info('connecting remote %r:%r...' % (str(address, 'utf-8'), port))
+            remote = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            remote.connect((address, port))
+            self.handleTCP(local, remote)
+        except socket.error as e:
+            logging.error(e)
+        finally:
+            pass
+
 
 if __name__ == '__main__':
-    proxy = LocalProxy(('127.0.0.1', 1234), LocalRequestHandler)
-    proxy.serve_forever()
+    logging.basicConfig(format='%(asctime)s %(message)s', level=logging.INFO)
+    logging.info('Local server starting...')
+    try:
+        local = LocalSocks5Server((LOCAL, PORT), LocalRequestHandler)
+        local.serve_forever()
+    except socket.error as e:
+        logging.error(e)
+    except KeyboardInterrupt:
+        logging.info('Stopping local server...')
+        local.shutdown()
+        exit(0)
