@@ -27,11 +27,12 @@ from sys import exit
 from socketserver import ThreadingTCPServer, StreamRequestHandler
 from struct import unpack, pack
 
-BUF_SIZE = 4096
-(LOCAL, PORT) = ('127.0.0.1', 1080)
+BUF_SIZE = 65536
+(LOCAL, LOCAL_PORT) = ('127.0.0.1', 1080)
+(REMOTE, REMOTE_PORT) = ('127.0.0.1', 9876)
 
 LOCK = threading.Lock()
-LOOP_RUNNING = False
+RUNNING_LOOPS = 0
 
 def send_data(sock, data):
     total = 0
@@ -65,11 +66,16 @@ class LocalRequestHandler(StreamRequestHandler):
             remote.close()
 
     def handle(self):
+        global RUNNING_LOOPS
+        LOCK.acquire()
+        RUNNING_LOOPS += 1
+        logging.info('Increasing running loops: [%d]' % RUNNING_LOOPS)
+        LOCK.release()
         try:
-            # Potential multi-threading issues, a lock is prefered
-            # print('Connection from: %r' % self.client_address[0])
             logging.info('Request from %r' % self.client_address[0])
             local = self.connection
+            proxy = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            proxy.connect((REMOTE, REMOTE_PORT))
             # Authentication negotiate
             r_data = local.recv(BUF_SIZE)
             # support GSSAPI & user/password in the future
@@ -94,36 +100,48 @@ class LocalRequestHandler(StreamRequestHandler):
                 elif atyp == 4:
                     return
                 else:
-                    logging.error('Wrong address type received')
+                    logging.error('Not supported address type')
                     return
                 
                 reply = b'\x05\x00\00' + r_data[3:]
                 local.send(reply)
+                proxy.send(r_data[3:])
             elif cmd == 3:
                 # UDP ASSOCIATE
+                pass
                 return
             else:
                 logging.error('Not supported command received')
                 return
             logging.info('connecting remote %r:%r...' % (str(address, 'utf-8'), port))
-            remote = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            remote.connect((address, port))
-            self.handleTCP(local, remote)
+
+            # remote = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            # remote.connect((address, port))
+            self.handleTCP(local, proxy)
         except socket.error as e:
             logging.error(e)
         finally:
-            pass
+            LOCK.acquire()
+            RUNNING_LOOPS -= 1
+            logging.info('Decreasing running loops: [%d]' % RUNNING_LOOPS)
+            LOCK.release()
 
 
 if __name__ == '__main__':
     logging.basicConfig(format='%(asctime)s %(message)s', level=logging.INFO)
     logging.info('Local server starting...')
     try:
-        local = LocalSocks5Server((LOCAL, PORT), LocalRequestHandler)
+        local = LocalSocks5Server((LOCAL, LOCAL_PORT), LocalRequestHandler)
         local.serve_forever()
     except socket.error as e:
         logging.error(e)
     except KeyboardInterrupt:
         logging.info('Stopping local server...')
-        local.shutdown()
+        LOCK.acquire()
+        logging.info('Entering into critical zone...')
+        if RUNNING_LOOPS > 0:
+            logging.info('Running loops: [%d]' % RUNNING_LOOPS)
+            local.shutdown()
+        logging.info('Leaving away critical zone...')
+        LOCK.release()
         exit(0)
