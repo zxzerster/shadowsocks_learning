@@ -34,16 +34,19 @@ BUF_SIZE = 65536
 LOCK = threading.Lock()
 RUNNING_LOOPS = 0
 
+# No obvious evidence that getfqdn slow down network speed for now
+# socket.getfqdn = lambda x: x
+
 def send_data(sock, data):
     total = 0
     while total < len(data):
         sent = sock.send(data[total:])
-        if sent < 0:
+        if sent <= 0:
             raise RuntimeError('Error - broken socket')
         total += sent
 
 class LocalSocks5Server(ThreadingTCPServer):
-    pass
+    allow_reuse_address = True
 
 class LocalRequestHandler(StreamRequestHandler):
     def handleTCP(self, local, remote):
@@ -69,13 +72,12 @@ class LocalRequestHandler(StreamRequestHandler):
         global RUNNING_LOOPS
         LOCK.acquire()
         RUNNING_LOOPS += 1
-        logging.info('Increasing running loops: [%d]' % RUNNING_LOOPS)
         LOCK.release()
         try:
             logging.info('Request from %r' % self.client_address[0])
             local = self.connection
-            proxy = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            proxy.connect((REMOTE, REMOTE_PORT))
+            # getfqdn implicitily used by calling getaddrinfo 
+            proxy = socket.create_connection((REMOTE, REMOTE_PORT))
             # Authentication negotiate
             r_data = local.recv(BUF_SIZE)
             # support GSSAPI & user/password in the future
@@ -115,15 +117,12 @@ class LocalRequestHandler(StreamRequestHandler):
                 return
             logging.info('connecting remote %r:%r...' % (str(address, 'utf-8'), port))
 
-            # remote = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            # remote.connect((address, port))
             self.handleTCP(local, proxy)
         except socket.error as e:
             logging.error(e)
         finally:
             LOCK.acquire()
             RUNNING_LOOPS -= 1
-            logging.info('Decreasing running loops: [%d]' % RUNNING_LOOPS)
             LOCK.release()
 
 

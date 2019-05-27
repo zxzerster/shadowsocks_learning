@@ -1,12 +1,18 @@
+import os
 import sys
 import socket
 import select
+import json
 import logging
 
 from socketserver import ThreadingTCPServer, StreamRequestHandler
 
+CONFIG = 'config.json'
 BUF_SIZE = 65536
 (PROXY, PORT) = ('0.0.0.0', 9876)
+
+# No obvious evidence that getfqdn slow down network speed
+# socket.getfqdn = lambda x: x
 
 def send_data(sock, data):
     total = 0
@@ -17,7 +23,7 @@ def send_data(sock, data):
         total += sent
 
 class RemoteProxyServer(ThreadingTCPServer):
-    pass
+    allow_reuse_address = True
 
 class RemoteRequestHandler(StreamRequestHandler):
     def handleTCP(self, local, dest):
@@ -27,9 +33,13 @@ class RemoteRequestHandler(StreamRequestHandler):
                 rfds, _, _ = select.select(r_fdset, [], [])
                 if local in rfds:
                     r_data = local.recv(BUF_SIZE)
+                    if len(r_data) <= 0:
+                        break
                     send_data(dest, r_data)
                 if dest in rfds:
                     r_data = dest.recv(BUF_SIZE)
+                    if len(r_data) <= 0:
+                        break
                     send_data(local, r_data)
         except socket.error as e:
             logging.error(e)
@@ -56,18 +66,38 @@ class RemoteRequestHandler(StreamRequestHandler):
             else:
                 logging.error('Not supported address type')
                 return
-            
-            dest = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            dest.connect((address, port))
+
+            dest = socket.create_connection((address, port))
             self.handleTCP(conn, dest)
         except socket.error as e:
             logging.error(e)
 
 if __name__ == '__main__':
+    os.chdir(os.path.dirname(__file__) or '.')
+    if os.path.exists(CONFIG):
+        try:
+            with open(CONFIG) as f:
+                config = json.load(f)
+            
+            SERVER = config['server']
+            SERVER_PORT = config['server_port']
+            LOCAL = config['local']
+            LOCAL_PORT = config['local_port']  
+        except IOError:
+            SERVER = '0.0.0.0'
+            SERVER_PORT = 9876
+            LOCAL = '127.0.0.1'
+            LOCAL_PORT = '1080'
+    else:
+        SERVER = '0.0.0.0'
+        SERVER_PORT = 9876
+        LOCAL = '127.0.0.1'
+        LOCAL_PORT = '1080'
+
     try:
         logging.basicConfig(format='%(asctime)s %(message)s', level=logging.INFO)
         logging.info('Remote proxy starting...')
-        proxy = RemoteProxyServer((PROXY, PORT), RemoteRequestHandler)
+        proxy = RemoteProxyServer((SERVER, SERVER_PORT), RemoteRequestHandler)
         proxy.serve_forever()
     except socket.error as e:
         logging.error(e)
