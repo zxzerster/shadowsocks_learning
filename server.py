@@ -17,10 +17,14 @@ BUF_SIZE = 65536
 def send_data(sock, data):
     total = 0
     while total < len(data):
-        sent = sock.send(data[total:])
-        if sent <= 0:
-            raise RuntimeError('Error - broken socket')
-        total += sent
+        try:
+            sent = sock.send(data[total:])
+            total += sent
+        except ConnectionAbortedError:
+            logging.info('Connection has been closed by peers')
+            sock.close()
+            break
+    return total
 
 class RemoteProxyServer(ThreadingTCPServer):
     allow_reuse_address = True
@@ -34,13 +38,21 @@ class RemoteRequestHandler(StreamRequestHandler):
                 if local in rfds:
                     r_data = local.recv(BUF_SIZE)
                     if len(r_data) <= 0:
+                        logging.info('Local has closed network connection')
                         break
-                    send_data(dest, r_data)
+                    l = send_data(dest, r_data)
+                    if l != len(r_data):
+                        logging.error('Sending data goes wrong')
+                        break
                 if dest in rfds:
                     r_data = dest.recv(BUF_SIZE)
                     if len(r_data) <= 0:
+                        logging.info('Remote host has closed network connection')
                         break
-                    send_data(local, r_data)
+                    l = send_data(local, r_data)
+                    if l != len(r_data):
+                        logging.error('Sending data goes wrong')
+                        break
         except socket.error as e:
             logging.error(e)
         finally:
@@ -56,11 +68,11 @@ class RemoteRequestHandler(StreamRequestHandler):
             atyp = r_data[0]
             if atyp == 1:
                 address = socket.inet_ntoa(r_data[1: 5])
-                logging.info('[address]: %r, [port]: %d' % (str(address, 'utf-8'), port))
+                logging.info('[address]: %r, [port]: %d' % (address, port))
             elif atyp == 3:
                 l = r_data[1]
                 address = r_data[2: 2 + l]
-                logging.info('[address]: %r, [port]: %d' % (str(address, 'utf-8'), port))
+                logging.info('[address]: %r, [port]: %d' % (address, 'utf-8', port))
             elif atyp == 4:
                 pass
             else:

@@ -40,10 +40,13 @@ RUNNING_LOOPS = 0
 def send_data(sock, data):
     total = 0
     while total < len(data):
-        sent = sock.send(data[total:])
-        if sent <= 0:
-            raise RuntimeError('Error - broken socket')
-        total += sent
+        try:
+            sent = sock.send(data[total:])
+            total += sent
+        except ConnectionAbortedError:
+            logging.info('Connection has been closed by peers')
+            break
+    return total
 
 class LocalSocks5Server(ThreadingTCPServer):
     allow_reuse_address = True
@@ -57,13 +60,21 @@ class LocalRequestHandler(StreamRequestHandler):
                 if local in rfds:
                     r_data = local.recv(BUF_SIZE)
                     if len(r_data) <= 0:
+                        logging.info('Local host has closed network connection')
                         break
-                    send_data(remote, r_data)
+                    l = send_data(remote, r_data)
+                    if l != len(r_data):
+                        logging.error('Sending data goes wrong')
+                        break
                 if remote in rfds:
                     r_data = remote.recv(BUF_SIZE)
                     if len(r_data) <= 0:
+                        logging.info('Remote proxy has closed network connection')
                         break
-                    send_data(local, r_data)
+                    l = send_data(local, r_data)
+                    if l != len(r_data):
+                        logging.error('Sending data goes wrong')
+                        break
         finally:
             local.close()
             remote.close()
@@ -80,6 +91,7 @@ class LocalRequestHandler(StreamRequestHandler):
             proxy = socket.create_connection((REMOTE, REMOTE_PORT))
             # Authentication negotiate
             r_data = local.recv(BUF_SIZE)
+
             # support GSSAPI & user/password in the future
             local.send(b'\x05\x00')
             
@@ -94,7 +106,7 @@ class LocalRequestHandler(StreamRequestHandler):
                 if atyp == 1:
                     data = r_data[4: 8]
                     address = socket.inet_ntoa(data)
-                    logging.info('[mode] CONNECT, [address]: %r, [port]: %r' % (str(address, 'utf-8'), port))
+                    logging.info('[mode] CONNECT, [address]: %r, [port]: %r' % (address, port))
                 elif atyp == 3:
                     l = r_data[4]
                     address = r_data[5: 5 + l]
@@ -109,13 +121,14 @@ class LocalRequestHandler(StreamRequestHandler):
                 local.send(reply)
                 proxy.send(r_data[3:])
             elif cmd == 3:
-                # UDP ASSOCIATE
-                pass
+                logging.info('==============================')
+                logging.info('UDP is coming')
+                logging.info('==============================')
                 return
             else:
                 logging.error('Not supported command received')
                 return
-            logging.info('connecting remote %r:%r...' % (str(address, 'utf-8'), port))
+            logging.info('connecting remote %r:%r...' % (address, port))
 
             self.handleTCP(local, proxy)
         except socket.error as e:
